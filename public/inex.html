@@ -1,54 +1,59 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Inv Lite</title>
-<style>
-  * { box-sizing: border-box; }
-  body { font-family: system-ui; max-width: 860px; margin: 2rem auto; padding: 0 1rem; background: #0f0f0f; color: #fff; }
-  .search { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
-  input { flex: 1; padding: .6rem; font-size: 1rem; border-radius: 6px; border: 1px solid #333; background: #1a1a1a; color: #fff; }
-  button { padding: .6rem 1.2rem; border-radius: 6px; border: none; background: #ff0000; color: #fff; cursor: pointer; }
-  video { width: 100%; border-radius: 8px; margin-top: 1rem; background: #000; }
-  .meta { margin-top: .8rem; }
-  .meta h3 { margin: 0 0 .3rem; }
-  .meta p { margin: 0; color: #aaa; font-size: .9rem; }
-</style>
+  <meta charset="UTF-8">
+  <title>Inv</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    body { font-family: system-ui; background: #0f0f0f; color: #fff; padding: 2rem; }
+    h1 { margin-bottom: 1rem; }
+    .search { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
+    .search input { flex: 1; padding: .6rem; border-radius: 4px; border: 1px solid #333; background: #1a1a1a; color: #fff; }
+    .search button { padding: .6rem 1.2rem; border-radius: 4px; border: none; background: #f00; color: #fff; cursor: pointer; }
+    video { width: 100%; max-width: 854px; border-radius: 8px; }
+    .meta { margin-top: 1rem; }
+    .meta h2 { font-size: 1.2rem; }
+    .meta p { color: #aaa; }
+    .formats { margin-top: .5rem; display: flex; gap: .5rem; }
+    .formats button { padding: .3rem .8rem; border-radius: 4px; border: 1px solid #444; background: #222; color: #fff; cursor: pointer; }
+    .formats button.active { background: #f00; border-color: #f00; }
+  </style>
 </head>
 <body>
-<h1>Inv Lite</h1>
-<div class="search">
-  <input id="q" placeholder="動画ID / YouTube URL" onkeydown="if(event.key==='Enter')play()">
-  <button onclick="play()">再生</button>
-</div>
-<div id="out"></div>
+  <h1>Inv</h1>
+  <div class="search">
+    <input id="url" type="text" placeholder="YouTube URL を貼る">
+    <button onclick="load()">再生</button>
+  </div>
+  <video id="player" controls></video>
+  <div class="meta" id="meta"></div>
 
-<script>
-const $ = id => document.getElementById(id);
+  <script>
+    function extractId(url) {
+      const m = url.match(/(?:youtu\.be\/|v=|embed\/|shorts\/)([\w-]{11})/);
+      return m ? m[1] : null;
+    }
 
-async function play() {
-  const q = $('q').value.trim();
-  if (!q) return;
-  const id = q.match(/(?:v=|youtu\.be\/)([\w-]{11})/)?.[1] || (q.match(/^[\w-]{11}$/) ? q : null);
-  if (!id) return alert('動画IDを指定してください');
+    async function load() {
+      const url = document.getElementById('url').value.trim();
+      const id = extractId(url);
+      if (!id) return alert('無効なURL');
 
-  $('out').innerHTML = '<p>Loading…</p>';
+      const res = await fetch(`/api/info?v=${id}`);
+      const info = await res.json();
+      if (info.error) return alert(info.error);
 
-  // メタ情報取得
-  const meta = await fetch(`/api/video/${id}`).then(r => r.ok ? r.json() : {});
+      document.getElementById('meta').innerHTML =
+        `<h2>${info.title}</h2><p>${info.author} (itag ${info.itag})</p>`;
 
-  $('out').innerHTML = `
-    <video id="player" controls autoplay></video>
-    <div class="meta">
-      <h3>${meta.title || ''}</h3>
-      <p>${meta.author_name || ''}</p>
-    </div>`;
+      const player = document.getElementById('player');
+      player.src = `/api/stream?v=${id}`;
+      player.play();
+    }
 
-  // ストリーム再生（プロキシ経由）
-  const player = $('player');
-  player.src = `/api/stream/${id}`;
-}
-</script>
+    document.getElementById('url').addEventListener('keydown', e => {
+      if (e.key === 'Enter') load();
+    });
+  </script>
 </body>
 </html>   
