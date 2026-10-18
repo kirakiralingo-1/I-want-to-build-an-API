@@ -1,118 +1,104 @@
 const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
-// ─── InnerTube でストリームURLを取得 ───
-async function getStreamUrl(videoId) {
-  const body = {
+const PORT = process.env.PORT || 3000;
+
+// --- 静的ファイル配信 ---
+function serveStatic(req, res) {
+  let filePath = req.url === '/' ? '/index.html' : req.url;
+  filePath = path.join(__dirname, filePath);
+  
+  const ext = path.extname(filePath);
+  const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
+  
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      res.writeHead(404);
+      res.end('Not Found');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream' });
+    res.end(data);
+  });
+}
+
+// --- YouTube player API を叩いてストリームURLを取得 ---
+function getStreamUrl(videoId, callback) {
+  const postData = JSON.stringify({
+    videoId,
     context: {
       client: {
         clientName: "ANDROID",
-        clientVersion: "20.10.38",
-        androidSdkVersion: 30,
-        hl: "ja",
-        gl: "JP",
+        clientVersion: "20.10.38"
       }
-    },
-    videoId
-  };
-
-  const res = await fetch("https://www.youtube.com/youtubei/v1/player", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body)
+    }
   });
-  const data = await res.json();
 
-  if (!data.streamingData?.formats?.length) {
-    throw new Error("streamingData not found");
-  }
-
-  // itag 22 = 720p mp4 (muxed), 18 = 360p mp4 (muxed)
-  // 高品質を優先して選ぶ
-  const preferred = [22, 18, 37];
-  const formats = data.streamingData.formats;
-  const chosen = preferred
-    .map(itag => formats.find(f => f.itag === itag))
-    .find(Boolean);
-
-  if (!chosen) throw new Error("no suitable format");
-
-  return {
-    url: chosen.url,
-    mimeType: chosen.mimeType,
-    itag: chosen.itag,
-    title: data.videoDetails?.title || "Unknown",
-    author: data.videoDetails?.author || "Unknown",
-    thumbnail: data.videoDetails?.thumbnail?.thumbnails?.at(-1)?.url
+  const options = {
+    hostname: 'www.youtube.com',
+    path: '/youtubei/v1/player',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(postData)
+    }
   };
+
+  const req = https.request(options, (res) => {
+    let body = '';
+    res.on('data', (chunk) => { body += chunk; });
+    res.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        const formats = data?.streamingData?.formats || [];
+        // 最高画質のプログレッシブ（音声+動画統合）形式を選ぶ
+        const best = formats.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+        if (best?.url) {
+          callback(null, best.url);
+        } else {
+          callback(new Error('Stream URL not found'));
+        }
+      } catch (e) {
+        callback(e);
+      }
+    });
+  });
+
+  req.on('error', callback);
+  req.write(postData);
+  req.end();
 }
 
-// ─── 静的ファイル配信 ───
-const MIME = {
-  '.html': 'text/html',
-  '.css': 'text/css',
-  '.js': 'text/javascript',
-};
+// --- サーバー ---
+const server = http.createServer((req, res) => {
+  // API エンドポイント
+  if (req.url.startsWith('/api/stream')) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const videoId = url.searchParams.get('id');
+    
+    if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid video ID' }));
+      return;
+    }
 
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, 'http://localhost');
-
-  // ─── API: ストリーム情報取得 ───
-  if (url.pathname === '/api/info') {
-    const videoId = url.searchParams.get('v');
-    if (!videoId) { res.writeHead(400); return res.end('missing v'); }
-    try {
-      const info = await getStreamUrl(videoId);
+    getStreamUrl(videoId, (err, streamUrl) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(info));
-    } catch (e) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
-    }
+      if (err) {
+        res.end(JSON.stringify({ error: err.message }));
+      } else {
+        res.end(JSON.stringify({ streamUrl }));
+      }
+    });
     return;
   }
 
-  // ─── API: 動画ストリームプロキシ ───
-  if (url.pathname === '/api/stream') {
-    const videoId = url.searchParams.get('v');
-    if (!videoId) { res.writeHead(400); return res.end('missing v'); }
-    try {
-      const info = await getStreamUrl(videoId);
-      const upstream = await fetch(info.url, {
-        headers: {
-          'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip'
-        }
-      });
-
-      res.writeHead(200, {
-        'Content-Type': info.mimeType,
-        'Content-Length': upstream.headers.get('content-length') || '',
-        'Accept-Ranges': 'bytes',
-        'Access-Control-Allow-Origin': '*',
-      });
-
-      // パイプでストリーム転送
-      const { Readable } = require('stream');
-      Readable.fromWeb(upstream.body).pipe(res);
-    } catch (e) {
-      res.writeHead(502);
-      res.end('stream error: ' + e.message);
-    }
-    return;
-  }
-
-  // ─── 静的ファイル ───
-  let file = url.pathname === '/' ? '/index.html' : url.pathname;
-  file = path.join(__dirname, 'public', file);
-  const ext = path.extname(file);
-  fs.readFile(file, (err, buf) => {
-    if (err) { res.writeHead(404); return res.end('404'); }
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'text/plain' });
-    res.end(buf);
-  });
+  // それ以外は静的ファイル
+  serveStatic(req, res);
 });
 
-server.listen(process.env.PORT || 3000, () => {
-  console.log(`Listening on :${process.env.PORT || 3000}`);
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });   
