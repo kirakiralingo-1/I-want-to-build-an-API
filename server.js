@@ -5,17 +5,13 @@ const path = require('path');
 
 const PORT = process.env.PORT || 3000;
 
-// --- 静的ファイル配信（修正） ---
+// --- 静的ファイル配信 ---
 function serveStatic(req, res) {
-  // クエリストリングを除去
   let urlPath = req.url.split('?')[0];
-  
-  // '/' なら index.html
   if (urlPath === '/') urlPath = '/index.html';
-  
+
   const filePath = path.join(__dirname, urlPath);
-  
-  // セキュリティ: 親ディレクトリへの参照を防止
+
   if (!filePath.startsWith(__dirname)) {
     res.writeHead(403);
     res.end('Forbidden');
@@ -50,7 +46,10 @@ function getStreamUrl(videoId, callback) {
     context: {
       client: {
         clientName: "ANDROID",
-        clientVersion: "20.10.38"
+        clientVersion: "20.10.38",
+        androidSdkVersion: 34,
+        hl: "en",
+        gl: "US"
       }
     }
   });
@@ -61,7 +60,8 @@ function getStreamUrl(videoId, callback) {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(postData)
+      'Content-Length': Buffer.byteLength(postData),
+      'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip'
     }
   };
 
@@ -71,12 +71,47 @@ function getStreamUrl(videoId, callback) {
     res.on('end', () => {
       try {
         const data = JSON.parse(body);
+        const status = data?.playabilityStatus?.status;
+        console.log('playabilityStatus:', status);
+
+        if (status !== 'OK') {
+          callback(new Error(`YouTube: ${status} - ${data?.playabilityStatus?.reason || 'unknown'}`));
+          return;
+        }
+
         const formats = data?.streamingData?.formats || [];
-        const best = formats.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+        const adaptive = data?.streamingData?.adaptiveFormats || [];
+
+        // 1) プログレッシブ（音声+動画統合）
+        let best = formats
+          .filter(f => f.url)
+          .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
         if (best?.url) {
           callback(null, best.url);
+          return;
+        }
+
+        // 2) adaptive: video + audio
+        const video = adaptive
+          .filter(f => f.url && f.mimeType?.startsWith('video/'))
+          .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+        const audio = adaptive
+          .filter(f => f.url && f.mimeType?.startsWith('audio/'))
+          .sort((a, b) => (b.audioQuality?.length || 0) - (a.audioQuality?.length || 0))[0];
+
+        if (video?.url && audio?.url) {
+          callback(null, { videoUrl: video.url, audioUrl: audio.url });
+        } else if (video?.url) {
+          callback(null, video.url);
         } else {
-          callback(new Error('Stream URL not found'));
+          const any = adaptive.find(f => f.url);
+          if (any) {
+            callback(null, any.url);
+          } else {
+            callback(new Error('No stream URL in response'));
+          }
         }
       } catch (e) {
         callback(e);
@@ -94,7 +129,7 @@ const server = http.createServer((req, res) => {
   if (req.url.startsWith('/api/stream')) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const videoId = url.searchParams.get('id');
-    
+
     if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Invalid video ID' }));
