@@ -6,68 +6,48 @@
 <title>Inv Lite</title>
 <style>
   * { box-sizing: border-box; }
-  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; background: #0f0f0f; color: #fff; }
-  h1 { font-size: 1.4rem; }
+  body { font-family: system-ui; max-width: 860px; margin: 2rem auto; padding: 0 1rem; background: #0f0f0f; color: #fff; }
   .search { display: flex; gap: .5rem; margin-bottom: 1.5rem; }
   input { flex: 1; padding: .6rem; font-size: 1rem; border-radius: 6px; border: 1px solid #333; background: #1a1a1a; color: #fff; }
-  button { padding: .6rem 1.2rem; border-radius: 6px; border: none; background: #ff0000; color: #fff; cursor: pointer; font-size: 1rem; }
-  .video { display: flex; gap: 1rem; margin: .8rem 0; padding: .5rem; border-radius: 8px; }
-  .video:hover { background: #1a1a1a; }
-  .video img { width: 168px; height: 94px; object-fit: cover; border-radius: 6px; flex-shrink: 0; }
-  .video h3 { margin: 0 0 .3rem; font-size: 1rem; }
-  .video p { margin: 0; color: #aaa; font-size: .85rem; }
-  a { color: #fff; text-decoration: none; }
-  .single { display: flex; gap: 1rem; margin-top: 1rem; }
-  .single img { width: 240px; height: 135px; object-fit: cover; border-radius: 8px; }
+  button { padding: .6rem 1.2rem; border-radius: 6px; border: none; background: #ff0000; color: #fff; cursor: pointer; }
+  video { width: 100%; border-radius: 8px; margin-top: 1rem; background: #000; }
+  .meta { margin-top: .8rem; }
+  .meta h3 { margin: 0 0 .3rem; }
+  .meta p { margin: 0; color: #aaa; font-size: .9rem; }
 </style>
 </head>
 <body>
 <h1>Inv Lite</h1>
 <div class="search">
-  <input id="q" placeholder="動画ID / URL / 検索キーワード" onkeydown="if(event.key==='Enter')go()">
-  <button onclick="go()">Go</button>
+  <input id="q" placeholder="動画ID / YouTube URL" onkeydown="if(event.key==='Enter')play()">
+  <button onclick="play()">再生</button>
 </div>
 <div id="out"></div>
 
 <script>
 const $ = id => document.getElementById(id);
 
-async function go() {
+async function play() {
   const q = $('q').value.trim();
   if (!q) return;
+  const id = q.match(/(?:v=|youtu\.be\/)([\w-]{11})/)?.[1] || (q.match(/^[\w-]{11}$/) ? q : null);
+  if (!id) return alert('動画IDを指定してください');
+
   $('out').innerHTML = '<p>Loading…</p>';
 
-  // 動画IDかURLなら単体表示、それ以外は検索
-  const idMatch = q.match(/(?:v=|youtu\.be\/)([\w-]{11})/);
-  const isId = idMatch || /^[\w-]{11}$/.test(q);
+  // メタ情報取得
+  const meta = await fetch(`/api/video/${id}`).then(r => r.ok ? r.json() : {});
 
-  if (isId) {
-    const id = idMatch ? idMatch[1] : q;
-    const r = await fetch(`/api/video/${id}`);
-    if (!r.ok) return $('out').innerHTML = '<p>見つかりません</p>';
-    const d = await r.json();
-    $('out').innerHTML = `
-      <div class="single">
-        <img src="${d.thumbnail_url}" />
-        <div>
-          <h3>${d.title}</h3>
-          <p>${d.author_name}</p>
-          <a href="https://youtube.com/watch?v=${id}" target="_blank">YouTubeで開く →</a>
-        </div>
-      </div>`;
-  } else {
-    const r = await fetch(`/api/search/${encodeURIComponent(q)}`);
-    const vids = await r.json();
-    if (!vids.length) return $('out').innerHTML = '<p>結果なし</p>';
-    $('out').innerHTML = vids.map(v => `
-      <a class="video" href="https://youtube.com/watch?v=${v.id}" target="_blank">
-        <img src="${v.thumb}" loading="lazy" />
-        <div>
-          <h3>${v.title}</h3>
-          <p>${v.channel}</p>
-        </div>
-      </a>`).join('');
-  }
+  $('out').innerHTML = `
+    <video id="player" controls autoplay></video>
+    <div class="meta">
+      <h3>${meta.title || ''}</h3>
+      <p>${meta.author_name || ''}</p>
+    </div>`;
+
+  // ストリーム再生（プロキシ経由）
+  const player = $('player');
+  player.src = `/api/stream/${id}`;
 }
 </script>
 </body>
