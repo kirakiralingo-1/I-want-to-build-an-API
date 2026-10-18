@@ -25,14 +25,10 @@
   <p id="status"></p>
 
   <script>
-    // URLから動画IDを自動抽出
     function extractId(input) {
-      // 11文字のIDそのもの
       if (/^[a-zA-Z0-9_-]{11}$/.test(input)) return input;
-      // youtube.com/watch?v=...
       let m = input.match(/[?&]v=([a-zA-Z0-9_-]{11})/);
       if (m) return m[1];
-      // youtu.be/...
       m = input.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
       if (m) return m[1];
       return null;
@@ -51,7 +47,12 @@
         const res = await fetch(`/api/stream?id=${id}`);
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        player.src = data.streamUrl;  // googlevideo.com のURLを直接設定
+
+        if (typeof data.streamUrl === 'string') {
+          player.src = data.streamUrl;
+        } else if (data.streamUrl?.videoUrl) {
+          player.src = data.streamUrl.videoUrl;
+        }
         player.play();
         status.textContent = '再生中';
       } catch (e) {
@@ -59,7 +60,6 @@
       }
     }
 
-    // Enterキーで再生
     document.getElementById('videoId').addEventListener('keydown', e => {
       if (e.key === 'Enter') loadVideo();
     });
