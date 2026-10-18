@@ -5,18 +5,37 @@ const path = require('path');
 
 const PORT = process.env.PORT || 3000;
 
-// --- 静的ファイル配信 ---
+// --- 静的ファイル配信（修正） ---
 function serveStatic(req, res) {
-  let filePath = req.url === '/' ? '/index.html' : req.url;
-  filePath = path.join(__dirname, filePath);
+  // クエリストリングを除去
+  let urlPath = req.url.split('?')[0];
   
+  // '/' なら index.html
+  if (urlPath === '/') urlPath = '/index.html';
+  
+  const filePath = path.join(__dirname, urlPath);
+  
+  // セキュリティ: 親ディレクトリへの参照を防止
+  if (!filePath.startsWith(__dirname)) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+
   const ext = path.extname(filePath);
-  const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
-  
+  const types = {
+    '.html': 'text/html',
+    '.js': 'text/javascript',
+    '.css': 'text/css',
+    '.json': 'application/json',
+    '.png': 'image/png',
+    '.svg': 'image/svg+xml'
+  };
+
   fs.readFile(filePath, (err, data) => {
     if (err) {
-      res.writeHead(404);
-      res.end('Not Found');
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not Found: ' + filePath);
       return;
     }
     res.writeHead(200, { 'Content-Type': types[ext] || 'application/octet-stream' });
@@ -24,7 +43,7 @@ function serveStatic(req, res) {
   });
 }
 
-// --- YouTube player API を叩いてストリームURLを取得 ---
+// --- YouTube player API ---
 function getStreamUrl(videoId, callback) {
   const postData = JSON.stringify({
     videoId,
@@ -53,7 +72,6 @@ function getStreamUrl(videoId, callback) {
       try {
         const data = JSON.parse(body);
         const formats = data?.streamingData?.formats || [];
-        // 最高画質のプログレッシブ（音声+動画統合）形式を選ぶ
         const best = formats.sort((a, b) => (b.height || 0) - (a.height || 0))[0];
         if (best?.url) {
           callback(null, best.url);
@@ -73,7 +91,6 @@ function getStreamUrl(videoId, callback) {
 
 // --- サーバー ---
 const server = http.createServer((req, res) => {
-  // API エンドポイント
   if (req.url.startsWith('/api/stream')) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const videoId = url.searchParams.get('id');
@@ -86,19 +103,16 @@ const server = http.createServer((req, res) => {
 
     getStreamUrl(videoId, (err, streamUrl) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      if (err) {
-        res.end(JSON.stringify({ error: err.message }));
-      } else {
-        res.end(JSON.stringify({ streamUrl }));
-      }
+      res.end(JSON.stringify(err ? { error: err.message } : { streamUrl }));
     });
     return;
   }
 
-  // それ以外は静的ファイル
   serveStatic(req, res);
 });
 
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`__dirname = ${__dirname}`);
+  console.log(`index.html exists = ${fs.existsSync(path.join(__dirname, 'index.html'))}`);
 });   
