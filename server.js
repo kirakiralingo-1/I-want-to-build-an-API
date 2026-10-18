@@ -39,89 +39,122 @@ function serveStatic(req, res) {
   });
 }
 
-// --- YouTube player API ---
+// --- YouTube player API（複数クライアントフォールバック） ---
 function getStreamUrl(videoId, callback) {
-  const postData = JSON.stringify({
-    videoId,
-    context: {
-      client: {
-        clientName: "ANDROID",
-        clientVersion: "20.10.38",
-        androidSdkVersion: 34,
-        hl: "en",
-        gl: "US"
-      }
+  const clients = [
+    {
+      clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+      clientVersion: "2.0",
+      hl: "en",
+      gl: "US"
+    },
+    {
+      clientName: "WEB_EMBEDDED_PLAYER",
+      clientVersion: "1.20240101.00.00",
+      hl: "en",
+      gl: "US"
+    },
+    {
+      clientName: "ANDROID",
+      clientVersion: "20.10.38",
+      androidSdkVersion: 34,
+      hl: "en",
+      gl: "US"
     }
-  });
+  ];
 
-  const options = {
-    hostname: 'www.youtube.com',
-    path: '/youtubei/v1/player',
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(postData),
-      'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip'
-    }
+  const uaMap = {
+    "TVHTML5_SIMPLY_EMBEDDED_PLAYER": 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version',
+    "WEB_EMBEDDED_PLAYER": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    "ANDROID": 'com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip'
   };
 
-  const req = https.request(options, (res) => {
-    let body = '';
-    res.on('data', (chunk) => { body += chunk; });
-    res.on('end', () => {
-      try {
-        const data = JSON.parse(body);
-        const status = data?.playabilityStatus?.status;
-        console.log('playabilityStatus:', status);
+  let idx = 0;
 
-        if (status !== 'OK') {
-          callback(new Error(`YouTube: ${status} - ${data?.playabilityStatus?.reason || 'unknown'}`));
-          return;
-        }
+  function tryNext() {
+    if (idx >= clients.length) {
+      callback(new Error('All clients blocked (LOGIN_REQUIRED)'));
+      return;
+    }
+    const client = clients[idx];
+    idx++;
 
-        const formats = data?.streamingData?.formats || [];
-        const adaptive = data?.streamingData?.adaptiveFormats || [];
-
-        // 1) プログレッシブ（音声+動画統合）
-        let best = formats
-          .filter(f => f.url)
-          .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-
-        if (best?.url) {
-          callback(null, best.url);
-          return;
-        }
-
-        // 2) adaptive: video + audio
-        const video = adaptive
-          .filter(f => f.url && f.mimeType?.startsWith('video/'))
-          .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
-
-        const audio = adaptive
-          .filter(f => f.url && f.mimeType?.startsWith('audio/'))
-          .sort((a, b) => (b.audioQuality?.length || 0) - (a.audioQuality?.length || 0))[0];
-
-        if (video?.url && audio?.url) {
-          callback(null, { videoUrl: video.url, audioUrl: audio.url });
-        } else if (video?.url) {
-          callback(null, video.url);
-        } else {
-          const any = adaptive.find(f => f.url);
-          if (any) {
-            callback(null, any.url);
-          } else {
-            callback(new Error('No stream URL in response'));
-          }
-        }
-      } catch (e) {
-        callback(e);
-      }
+    const postData = JSON.stringify({
+      videoId,
+      context: { client }
     });
-  });
 
-  req.on('error', callback);
-  req.write(postData);
-  req.end();
+    const options = {
+      hostname: 'www.youtube.com',
+      path: '/youtubei/v1/player',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData),
+        'User-Agent': uaMap[client.clientName] || 'Mozilla/5.0'
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          const status = data?.playabilityStatus?.status;
+          console.log(`[${client.clientName}] status: ${status}`);
+
+          if (status !== 'OK') {
+            tryNext();
+            return;
+          }
+
+          const formats = data?.streamingData?.formats || [];
+          const adaptive = data?.streamingData?.adaptiveFormats || [];
+
+          // 1) プログレッシブ（音声+動画統合）
+          let best = formats
+            .filter(f => f.url)
+            .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+          if (best?.url) {
+            callback(null, best.url);
+            return;
+          }
+
+          // 2) adaptive: video + audio
+          const video = adaptive
+            .filter(f => f.url && f.mimeType?.startsWith('video/'))
+            .sort((a, b) => (b.height || 0) - (a.height || 0))[0];
+
+          const audio = adaptive
+            .filter(f => f.url && f.mimeType?.startsWith('audio/'))
+            .sort((a, b) => (b.audioQuality?.length || 0) - (a.audioQuality?.length || 0))[0];
+
+          if (video?.url && audio?.url) {
+            callback(null, { videoUrl: video.url, audioUrl: audio.url });
+          } else if (video?.url) {
+            callback(null, video.url);
+          } else {
+            const any = adaptive.find(f => f.url);
+            if (any) {
+              callback(null, any.url);
+            } else {
+              tryNext();
+            }
+          }
+        } catch (e) {
+          tryNext();
+        }
+      });
+    });
+
+    req.on('error', () => tryNext());
+    req.write(postData);
+    req.end();
+  }
+
+  tryNext();
 }
 
 // --- サーバー ---
